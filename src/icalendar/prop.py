@@ -237,13 +237,22 @@ class vInt(int):
 class vDDDLists:
     """A list of vDDDTypes values.
     """
-    def __init__(self, dt_list):
+    def __init__(self, dt_list, type_class=None):
+        if type_class is None:
+            type_class = vDDDTypes
         if not hasattr(dt_list, '__iter__'):
             dt_list = [dt_list]
         vDDD = []
         tzid = None
+        if dt_list:
+            # we have some values, all should have the same type
+            ltype = type(dt_list[0])
         for dt in dt_list:
-            dt = vDDDTypes(dt)
+            # raise ValueError if type of the input values differs
+            if not type(dt) == ltype:
+                raise ValueError("Trying to insert '%s' value into a list "
+                                 "of '%s'".format(type(dt), ltype))
+            dt = type_class(dt)
             vDDD.append(dt)
             if 'TZID' in dt.params:
                 tzid = dt.params['TZID']
@@ -257,12 +266,16 @@ class vDDDLists:
         dts_ical = (dt.to_ical() for dt in self.dts)
         return b",".join(dts_ical)
 
-    @staticmethod
-    def from_ical(ical, timezone=None):
+    @classmethod
+    def from_ical(cls, ical, timezone=None, unit_type=None):
+        if isinstance(ical, cls):
+            return ical.dts
+        if unit_type is None:
+            unit_type = vDDDTypes
         out = []
         ical_dates = ical.split(",")
         for ical_dt in ical_dates:
-            out.append(vDDDTypes.from_ical(ical_dt, timezone=timezone))
+            out.append(unit_type.from_ical(ical_dt, timezone=timezone))
         return out
 
 class vCategory:
@@ -271,6 +284,7 @@ class vCategory:
         if not hasattr(c_list, '__iter__'):
             c_list = [c_list]
         self.cats = [vText(c) for c in c_list]
+        self.params = Parameters()
 
     def to_ical(self):
         return b",".join([c.to_ical() for c in self.cats])
@@ -288,20 +302,19 @@ class vDDDTypes:
     So this is practical.
     """
     def __init__(self, dt):
-        if not isinstance(dt, (datetime, date, timedelta, time, tuple)):
+        if type(dt) not in (datetime, date, timedelta, time, tuple):
             raise ValueError('You must use datetime, date, timedelta, '
                              'time or tuple (for periods)')
-        if isinstance(dt, datetime):
+        if type(dt) is datetime:
             self.params = Parameters({'value': 'DATE-TIME'})
-        elif isinstance(dt, date):
+        elif type(dt) is date:
             self.params = Parameters({'value': 'DATE'})
-        elif isinstance(dt, time):
+        elif type(dt) is time:
             self.params = Parameters({'value': 'TIME'})
-        elif isinstance(dt, tuple):
+        elif type(dt) is tuple:
             self.params = Parameters({'value': 'PERIOD'})
 
-        if (isinstance(dt, datetime) or isinstance(dt, time))\
-                and getattr(dt, 'tzinfo', False):
+        if type(dt) in (datetime, time) and hasattr(dt, 'tzinfo'):
             tzinfo = dt.tzinfo
             tzid = tzid_from_dt(dt)
             if tzid != 'UTC':
@@ -310,15 +323,15 @@ class vDDDTypes:
 
     def to_ical(self):
         dt = self.dt
-        if isinstance(dt, datetime):
+        if type(dt) is datetime:
             return vDatetime(dt).to_ical()
-        elif isinstance(dt, date):
+        elif type(dt) is date:
             return vDate(dt).to_ical()
-        elif isinstance(dt, timedelta):
+        elif type(dt) is timedelta:
             return vDuration(dt).to_ical()
-        elif isinstance(dt, time):
+        elif type(dt) is time:
             return vTime(dt).to_ical()
-        elif isinstance(dt, tuple) and len(dt) == 2:
+        elif type(dt) is tuple and len(dt) == 2:
             return vPeriod(dt).to_ical()
         else:
             raise ValueError(f'Unknown date type: {type(dt)}')
@@ -354,7 +367,7 @@ class vDate:
     """Render and generates iCalendar date format.
     """
     def __init__(self, dt):
-        if not isinstance(dt, date):
+        if type(dt) is not date:
             raise ValueError('Value MUST be a date instance')
         self.dt = dt
         self.params = Parameters({'value': 'DATE'})
@@ -363,9 +376,14 @@ class vDate:
         s = "%04d%02d%02d" % (self.dt.year, self.dt.month, self.dt.day)
         return s.encode('utf-8')
 
-    @staticmethod
-    def from_ical(ical):
+    @classmethod
+    def from_ical(cls, ical, timezone=None):
+        # timezone is a dummy in this method
+        if isinstance(ical, cls):
+            return ical.dt
         try:
+            if len(ical) != 8:  # YYYYMMDD is 8 digits
+                raise ValueError
             timetuple = (
                 int(ical[:4]),  # year
                 int(ical[4:6]),  # month
@@ -373,7 +391,7 @@ class vDate:
             )
             return date(*timetuple)
         except Exception:
-            raise ValueError('Wrong date format %s' % ical)
+            raise ValueError("Wrong date format '%s'" % ical)
 
 
 class vDatetime:
@@ -389,7 +407,15 @@ class vDatetime:
     """
     def __init__(self, dt):
         self.dt = dt
-        self.params = Parameters()
+        self.params = Parameters({'value': 'DATE-TIME'})
+        if hasattr(dt, 'tzinfo'):
+            tzinfo = dt.tzinfo
+            if tzinfo is not pytz.utc and\
+               (tzutc is None or not isinstance(tzinfo, tzutc)):
+                # set the timezone as a parameter to the property
+                tzid = tzid_from_dt(dt)
+                if tzid:
+                    self.params.update({'TZID': tzid})
 
     def to_ical(self):
         dt = self.dt
@@ -409,8 +435,10 @@ class vDatetime:
             self.params.update({'TZID': tzid})
         return s.encode('utf-8')
 
-    @staticmethod
-    def from_ical(ical, timezone=None):
+    @classmethod
+    def from_ical(cls, ical, timezone=None):
+        if isinstance(ical, cls):
+            return ical.dt
         tzinfo = None
         if timezone:
             try:
@@ -422,6 +450,10 @@ class vDatetime:
                     tzinfo = _timezone_cache.get(timezone, None)
 
         try:
+            if len(ical) not in (15, 16):
+                raise ValueError
+            if ical[8] != 'T':
+                raise ValueError
             timetuple = (
                 int(ical[:4]),  # year
                 int(ical[4:6]),  # month
@@ -434,12 +466,12 @@ class vDatetime:
                 return tzinfo.localize(datetime(*timetuple))
             elif not ical[15:]:
                 return datetime(*timetuple)
-            elif ical[15:16] == 'Z':
+            elif ical[15] == 'Z':
                 return pytz.utc.localize(datetime(*timetuple))
             else:
                 raise ValueError(ical)
         except Exception:
-            raise ValueError('Wrong datetime format: %s' % ical)
+            raise ValueError("Wrong datetime format '%s'" % ical)
 
 
 class vDuration:
@@ -448,10 +480,16 @@ class vDuration:
     """
 
     def __init__(self, td):
-        if not isinstance(td, timedelta):
+        if type(td) is not timedelta:
             raise ValueError('Value MUST be a timedelta instance')
         self.td = td
-        self.params = Parameters()
+        self.params = Parameters({'value': 'DURATION'})
+
+    @property
+    def dt(self):
+        # BBB: Backwards compatibility.
+        #      Might be removed in future version.
+        return self.td
 
     def to_ical(self):
         sign = ""
@@ -479,8 +517,10 @@ class vDuration:
                     str(abs(td.days)).encode('utf-8') +
                     b'D' + str(timepart).encode('utf-8'))
 
-    @staticmethod
-    def from_ical(ical):
+    @classmethod
+    def from_ical(cls, ical):
+        if isinstance(ical, cls):
+            return ical.td
         try:
             match = DURATION_REGEX.match(ical)
             sign, weeks, days, hours, minutes, seconds = match.groups()
@@ -503,15 +543,13 @@ class vPeriod:
     """
     def __init__(self, per):
         start, end_or_duration = per
-        if not (isinstance(start, datetime) or isinstance(start, date)):
+        if type(start) not in (datetime, date):
             raise ValueError('Start value MUST be a datetime or date instance')
-        if not (isinstance(end_or_duration, datetime) or
-                isinstance(end_or_duration, date) or
-                isinstance(end_or_duration, timedelta)):
+        if type(end_or_duration) not in (datetime, date, timedelta):
             raise ValueError('end_or_duration MUST be a datetime, '
                              'date or timedelta instance')
         by_duration = 0
-        if isinstance(end_or_duration, timedelta):
+        if type(end_or_duration) is timedelta:
             by_duration = 1
             duration = end_or_duration
             end = start + duration
@@ -521,7 +559,7 @@ class vPeriod:
         if start > end:
             raise ValueError("Start time is greater than end time")
 
-        self.params = Parameters()
+        self.params = Parameters({'value': 'PERIOD'})
         # set the timezone identifier
         # does not support different timezones for start and end
         tzid = tzid_from_dt(start)
@@ -552,12 +590,14 @@ class vPeriod:
         return (vDatetime(self.start).to_ical() + b'/' +
                 vDatetime(self.end).to_ical())
 
-    @staticmethod
-    def from_ical(ical):
+    @classmethod
+    def from_ical(cls, ical, timezone=None):
+        if isinstance(ical, cls):
+            return (self.start, self.end)
         try:
             start, end_or_duration = ical.split('/')
-            start = vDDDTypes.from_ical(start)
-            end_or_duration = vDDDTypes.from_ical(end_or_duration)
+            start = vDDDTypes.from_ical(start, timezone)
+            end_or_duration = vDDDTypes.from_ical(end_or_duration, timezone)
             return (start, end_or_duration)
         except Exception:
             raise ValueError('Expected period format, got: %s' % ical)
@@ -740,12 +780,20 @@ class vTime:
 
     def __init__(self, *args):
         if len(args) == 1:
-            if not isinstance(args[0], (time, datetime)):
+            if type(args[0]) not in (time, datetime):
                 raise ValueError('Expected a datetime.time, got: %s' % args[0])
             self.dt = args[0]
         else:
             self.dt = time(*args)
         self.params = Parameters({'value': 'TIME'})
+        if hasattr(self.dt, 'tzinfo'):
+            tzinfo = self.dt.tzinfo
+            if tzinfo is not pytz.utc and\
+               (tzutc is None or not isinstance(tzinfo, tzutc)):
+                # set the timezone as a parameter to the property
+                tzid = tzid_from_dt(self.dt)
+                if tzid:
+                    self.params.update({'TZID': tzid})
 
     def to_ical(self):
         return self.dt.strftime("%H%M%S")
@@ -754,10 +802,12 @@ class vTime:
     def from_ical(ical):
         # TODO: timezone support
         try:
+            if len(ical) not in (6,7):
+                raise ValueError
             timetuple = (int(ical[:2]), int(ical[2:4]), int(ical[4:6]))
             return time(*timetuple)
         except Exception:
-            raise ValueError('Expected time, got: %s' % ical)
+            raise ValueError("Expected time, got: '%s'" % ical)
 
 
 class vUri(str):
@@ -819,7 +869,7 @@ class vUTCOffset:
                                 # propagate upwards
 
     def __init__(self, td):
-        if not isinstance(td, timedelta):
+        if not type(td) is timedelta:
             raise ValueError('Offset value MUST be a timedelta instance')
         self.td = td
         self.params = Parameters()
@@ -921,9 +971,9 @@ class TypesFactory(CaselessDict):
         self['binary'] = vBinary
         self['boolean'] = vBoolean
         self['cal-address'] = vCalAddress
-        self['date'] = vDDDTypes
-        self['date-time'] = vDDDTypes
-        self['duration'] = vDDDTypes
+        self['date'] = vDate
+        self['date-time'] = vDatetime
+        self['duration'] = vDuration
         self['float'] = vFloat
         self['integer'] = vInt
         self['period'] = vPeriod
@@ -950,7 +1000,7 @@ class TypesFactory(CaselessDict):
         'prodid': 'text',
         'version': 'text',
         # Descriptive Component Properties
-        'attach': 'uri',
+        'attach': ('uri', 'binary'),
         'categories': 'categories',
         'class': 'text',
         'comment': 'text',
@@ -964,9 +1014,9 @@ class TypesFactory(CaselessDict):
         'summary': 'text',
         # Date and Time Component Properties
         'completed': 'date-time',
-        'dtend': 'date-time',
-        'due': 'date-time',
-        'dtstart': 'date-time',
+        'dtend': ('date-time', 'date'),
+        'due': ('date-time', 'date'),
+        'dtstart': ('date-time', 'date'),
         'duration': 'duration',
         'freebusy': 'period',
         'transp': 'text',
@@ -980,23 +1030,23 @@ class TypesFactory(CaselessDict):
         'attendee': 'cal-address',
         'contact': 'text',
         'organizer': 'cal-address',
-        'recurrence-id': 'date-time',
+        'recurrence-id': ('date-time', 'date'),
         'related-to': 'text',
         'url': 'uri',
         'uid': 'text',
         # Recurrence Component Properties
-        'exdate': 'date-time-list',
-        'exrule': 'recur',
-        'rdate': 'date-time-list',
+        'exdate': ('date-time', 'date'),  # list
+        'exrule': 'recur',  # deprecated in RFC 5545
+        'rdate': ('date-time', 'date', 'period'),  # list
         'rrule': 'recur',
         # Alarm Component Properties
         'action': 'text',
         'repeat': 'integer',
-        'trigger': 'duration',
+        'trigger': ('duration', 'date-time'),  # if datetime, must be UTC format
         # Change Management Component Properties
-        'created': 'date-time',
-        'dtstamp': 'date-time',
-        'last-modified': 'date-time',
+        'created': 'date-time',  # must be in UTC time format
+        'dtstamp': 'date-time',  # must be in UTC time format
+        'last-modified': 'date-time',  # must be in UTC time format
         'sequence': 'integer',
         # Miscellaneous Component Properties
         'request-status': 'text',
@@ -1020,14 +1070,80 @@ class TypesFactory(CaselessDict):
         'role': 'text',
         'rsvp': 'boolean',
         'sent-by': 'cal-address',
-        'tzid': 'text',
+        # 'tzid': 'text', would be an overlapping duplicate
         'value': 'text',
     })
 
-    def for_property(self, name):
-        """Returns a the default type for a property or parameter
+    native_type_map = {
+        datetime: 'date-time',
+        date: 'date',
+    }
+
+    datetime_names = (
+        'COMPLETED',
+        'CREATED',
+        'DTEND',
+        'DTSTAMP',
+        'DTSTART',
+        'DUE',
+        'DURATION',
+        'EXDATE'
+        'FREEBUSY',
+        'LAST-MODIFIED',
+        'RDATE',
+        'RECURRENCE-ID',
+        'TRIGGER',
+    )
+    date_list_properties = ('EXDATE', 'RDATE')
+
+    def is_date_list_property(self, name):
+        if name.upper() in self.date_list_properties:
+            return True
+        return False
+
+    def for_property(self, name, valuetype=None, nativetype=None):
+        """Returns inner representation type for a property
+        @param valuetype: the value of the VALUE parameter if set
         """
-        return self[self.types_map.get(name, 'text')]
+        res_type = self.types_map.get(name)
+        _nativetype = self.native_type_map.get(nativetype)
+
+        if res_type is None:
+            # Unknown property
+
+            if valuetype and valuetype.upper() in list(self.keys()):
+                return self[valuetype]
+
+            if _nativetype:
+                return self[_nativetype]
+
+            return self['text']  # Default fallback
+
+        if isinstance(res_type, tuple):
+            # List of values should have the same type
+
+            if valuetype:
+                # VALUE was set
+                valuetype = valuetype.lower()
+                if valuetype not in res_type:
+                    raise ValueError("The VALUE parameter of {name} property "
+                                     "is not supported: '{type}'"
+                                     .format(name=name, type=valuetype.upper())
+                                     )
+                # The type in VALUE can be used
+                return self[valuetype]
+
+            if _nativetype:
+                return self[_nativetype]
+
+            return self[res_type[0]]  # Fallback, use first type of tuple.
+
+        elif valuetype and valuetype.lower() != res_type:
+            raise ValueError("The VALUE parameter of {name} property is "
+                             "not supported: '{type}'"
+                             .format(name=name, type=valuetype.upper()))
+
+        return self[res_type]
 
     def to_ical(self, name, value):
         """Encodes a named value from a primitive python type to an icalendar
@@ -1036,10 +1152,14 @@ class TypesFactory(CaselessDict):
         type_class = self.for_property(name)
         return type_class(value).to_ical()
 
-    def from_ical(self, name, value):
+    def from_ical(self, name, value, valuetype=None):
         """Decodes a named property or parameter value from an icalendar
         encoded string to a primitive python type.
         """
-        type_class = self.for_property(name)
-        decoded = type_class.from_ical(value)
+        type_class = self.for_property(name, valuetype)
+        if name.upper() in self.date_list_properties:
+            # this property is of list type
+            decoded = vDDDLists.from_ical(value, unit_type=type_class)
+        else:
+            decoded = type_class.from_ical(value)
         return decoded

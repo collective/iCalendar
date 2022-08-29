@@ -94,6 +94,13 @@ class TestProp(unittest.TestCase):
         dt_list = vDDDLists([datetime(2000, 1, 1), datetime(2000, 11, 11)])
         self.assertEqual(dt_list.to_ical(), b'20000101T000000,20001111T000000')
 
+    def test_prop_vDDDLists_same_types(self):
+        """vDDDLists should raise an error when initialized with different date/time types.
+        """
+        from ..prop import vDDDLists
+        with self.assertRaises(ValueError):
+            vDDDLists([date.today(), datetime.now()])
+
     def test_prop_vDDDTypes(self):
         from ..prop import vDDDTypes
 
@@ -515,6 +522,72 @@ class TestProp(unittest.TestCase):
         self.assertEqual(
             factory.from_ical('cn', b'Rasmussen\\, Max M\xc3\xb8ller'),
             'Rasmussen, Max M\xf8ller'
+        )
+
+    def test_prop_TypesFactory_for_property(self):
+        """Test all the different supported cases of for_property
+        """
+        from icalendar import prop
+        factory = prop.TypesFactory()
+
+        today = date.today()
+        now = datetime.now()
+
+        self.assertEqual(
+            factory.for_property("version"),
+            prop.vText
+        )
+
+        self.assertEqual(
+            factory.for_property("rrule"),
+            prop.vRecur
+        )
+
+        # dtstart can be date-time or date
+        # Default
+        self.assertEqual(
+            factory.for_property("dtstart"),
+            prop.vDatetime
+        )
+        # Specifying the valuetype
+        self.assertEqual(
+            factory.for_property("dtstart", valuetype="date"),
+            prop.vDate
+        )
+        # Passing a native type
+        self.assertEqual(
+            factory.for_property("dtstart", nativetype=type(today)),
+            prop.vDate
+        )
+        # valuetype takes precedence
+        self.assertEqual(
+            factory.for_property("dtstart", valuetype="date", nativetype=type(now)),
+            prop.vDate
+        )
+
+        # Asking for not existent types raises ValueError
+        with self.assertRaises(ValueError):
+            factory.for_property("dtstart", valuetype="does-not-exist")
+        with self.assertRaises(ValueError):
+            factory.for_property("version", valuetype="does-not-exist")
+
+        # Unsresolved name fallbacks
+        self.assertEqual(
+            factory.for_property("does-not-exist"),
+            prop.vText
+        )
+        self.assertEqual(
+            factory.for_property("does-not-exist", valuetype="date"),
+            prop.vDate
+        )
+        self.assertEqual(
+            factory.for_property("does-not-exist", nativetype=type(today)),
+            prop.vDate
+        )
+        # valuetype takes precedence
+        self.assertEqual(
+            factory.for_property("does-not-exist", valuetype="date", nativetype=type(now)),
+            prop.vDate
         )
 
 

@@ -113,7 +113,7 @@ class Component(CaselessDict):
     #############################
     # handling of property values
 
-    def _encode(self, name, value, parameters=None, encode=1):
+    def _encode(self, name, value, parameters=None, encode=True):
         """Encode values to icalendar property values.
 
         :param name: Name of the property.
@@ -139,19 +139,27 @@ class Component(CaselessDict):
         if isinstance(value, types_factory.all_types):
             # Don't encode already encoded values.
             return value
-        klass = types_factory.for_property(name)
-        obj = klass(value)
         if parameters:
             if isinstance(parameters, dict):
                 params = Parameters()
                 for key, item in parameters.items():
                     params[key] = item
                 parameters = params
+        klass = types_factory.for_property(
+            name,
+            valuetype=parameters.get('VALUE') if parameters else None,
+            nativetype=type(value)
+        )
+        if types_factory.is_date_list_property(name):
+            obj = vDDDLists(value, klass)
+        else:
+            obj = klass(value)
+        if parameters:
             assert isinstance(parameters, Parameters)
             obj.params = parameters
         return obj
 
-    def add(self, name, value, parameters=None, encode=1):
+    def add(self, name, value, parameters=None, encode=True):
         """Add a property.
 
         :param name: Name of the property.
@@ -172,7 +180,7 @@ class Component(CaselessDict):
 
         :returns: None
         """
-        if isinstance(value, datetime) and\
+        if type(value) is datetime and\
                 name.lower() in ('dtstamp', 'created', 'last-modified'):
             # RFC expects UTC for those... force value conversion.
             if getattr(value, 'tzinfo', False) and value.tzinfo is not None:
@@ -183,7 +191,8 @@ class Component(CaselessDict):
 
         # encode value
         if encode and isinstance(value, list) \
-                and name.lower() not in ['rdate', 'exdate', 'categories']:
+                and not types_factory.is_date_list_property(name)\
+                and name.lower() not in ('categories',):
             # Individually convert each value to an ical type except rdate and
             # exdate, where lists of dates might be passed to vDDDLists.
             value = [self._encode(name, v, parameters, encode) for v in value]
@@ -215,7 +224,11 @@ class Component(CaselessDict):
         if isinstance(value, vDDDLists):
             # TODO: Workaround unfinished decoding
             return value
-        decoded = types_factory.from_ical(name, value)
+        try:
+            valtype = value.params['VALUE']
+        except (AttributeError, KeyError):
+            valtype = None
+        decoded = types_factory.from_ical(name, value, valtype)
         # TODO: remove when proper decoded is implemented in every prop.* class
         # Workaround to decode vText properly
         if isinstance(decoded, vText):
@@ -223,11 +236,8 @@ class Component(CaselessDict):
         return decoded
 
     def decoded(self, name, default=_marker):
-        """Returns decoded value of property.
+        """Returns value of a property as a python native type.
         """
-        # XXX: fail. what's this function supposed to do in the end?
-        # -rnix
-
         if name in self:
             value = self[name]
             if isinstance(value, list):
@@ -243,7 +253,7 @@ class Component(CaselessDict):
     # Inline values. A few properties have multiple values inlined in in one
     # property line. These methods are used for splitting and joining these.
 
-    def get_inline(self, name, decode=1):
+    def get_inline(self, name, decode=True):
         """Returns a list of values (split on comma).
         """
         vals = [v.strip('" ') for v in q_split(self[name])]
@@ -251,12 +261,12 @@ class Component(CaselessDict):
             return [self._decode(name, val) for val in vals]
         return vals
 
-    def set_inline(self, name, values, encode=1):
-        """Converts a list of values into comma separated string and sets value
+    def set_inline(self, name, values, encode=True):
+        """Converts a list of values into comma seperated string and sets value
         to that.
         """
         if encode:
-            values = [self._encode(name, value, encode=1) for value in values]
+            values = [self._encode(name, value, encode=True) for value in values]
         self[name] = types_factory['inline'](q_join(values))
 
     #########################
@@ -367,21 +377,43 @@ class Component(CaselessDict):
                     _timezone_cache[component['TZID']] = component.to_tz()
             # we are adding properties to the current top of the stack
             else:
-                factory = types_factory.for_property(name)
                 component = stack[-1] if stack else None
                 if not component:
                     raise ValueError('Property "{prop}" does not have '
                                      'a parent component.'.format(prop=name))
-                datetime_names = ('DTSTART', 'DTEND', 'RECURRENCE-ID', 'DUE',
-                                  'FREEBUSY', 'RDATE', 'EXDATE')
+
                 try:
-                    if name in datetime_names and 'TZID' in params:
-                        vals = factory(factory.from_ical(vals, params['TZID']))
-                    else:
-                        vals = factory(factory.from_ical(vals))
+                    factory = types_factory.for_property(name,
+                                                         valuetype=params.get('VALUE'))
                 except ValueError as e:
                     if not component.ignore_exceptions:
                         raise
+                    else:
+                        # add error message and fall back to vText value type
+                        component.errors.append((uname, str(e)))
+                        factory = types_factory['text']
+
+                try:
+                    if (types_factory.is_date_list_property(name) and
+                            factory != vText):
+                        # TODO: list type currenty supports only datetime types
+                        vals = vDDDLists(
+                            vDDDLists.from_ical(vals, params.get('TZID'),
+                                                factory))
+                    elif uname in types_factory.datetime_names and 'TZID' in params:
+                        vals = factory(factory.from_ical(vals, params['TZID']))
+                    else:
+                        vals = factory(factory.from_ical(vals))
+
+                except ValueError as e:
+                    if not component.ignore_exceptions:
+                        raise
+#                    component.errors.append((uname, unicode_type(e)))
+#                    # fallback to vText and store the original value
+#                    vals = types_factory['text'](vals)
+#
+#                vals.params = params
+#                component.add(name, vals, encode=0)
                     component.errors.append((uname, str(e)))
                     component.add(name, None, encode=0)
                 else:
@@ -594,9 +626,9 @@ class Timezone(Component):
         dst = {}
         tznames = set()
         for component in self.walk():
-            if type(component) == Timezone:
+            if type(component) is Timezone:
                 continue
-            assert isinstance(component['DTSTART'].dt, datetime), (
+            assert type(component['DTSTART'].dt) is datetime, (
                 "VTIMEZONEs sub-components' DTSTART must be of type datetime, not date"
             )
             try:
